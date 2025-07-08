@@ -192,7 +192,6 @@ def egru_layer_macs(inputs, layer, total, in_states):
     Returns:
         int: The number of MACs.
     """
-    print("computing egru layer macs")
     macs = 0
     layer_bin = make_binary_copy(layer, all_ones=total)
     # kernel.T is [3*hidden_size, input_size]
