@@ -1,4 +1,4 @@
-from neurobench.blocks.layer import STATELESS_LAYERS, RECURRENT_LAYERS, RECURRENT_CELLS
+from neurobench.blocks.layer import EGRU_LAYERS, STATELESS_LAYERS, RECURRENT_LAYERS, RECURRENT_CELLS
 import copy
 import torch
 
@@ -43,6 +43,18 @@ def make_binary_copy(layer, all_ones=False):
         attribute_names = ["weight_ih", "weight_hh"]
         if layer.bias:
             attribute_names += ["bias_ih", "bias_hh"]
+
+        for attr in attribute_names:
+            with torch.no_grad():
+                attr_val = getattr(layer_copy, attr)
+                setattr(
+                    layer_copy,
+                    attr,
+                    torch.nn.Parameter(binarize_tensor(attr_val.data, all_ones)),
+                )
+    elif isinstance(layer, EGRU_LAYERS):
+        attribute_names = ["kernel", "recurrent_kernel"]
+        attribute_names += ["bias", "recurrent_bias"]
 
         for attr in attribute_names:
             with torch.no_grad():

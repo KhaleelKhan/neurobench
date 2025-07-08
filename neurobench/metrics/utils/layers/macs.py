@@ -1,4 +1,9 @@
-from neurobench.blocks.layer import STATELESS_LAYERS, RECURRENT_LAYERS, RECURRENT_CELLS
+from neurobench.blocks.layer import (
+    EGRU_LAYERS,
+    STATELESS_LAYERS,
+    RECURRENT_LAYERS,
+    RECURRENT_CELLS,
+)
 import torch
 from .input import binary_inputs
 from .binary_copy import make_binary_copy
@@ -175,6 +180,96 @@ def recurrent_cell_macs(inputs, layer, total, in_states):
     return macs
 
 
+def egru_layer_macs(inputs, layer, total, in_states):
+    """
+    Computes the MACs for an EGRU layer.
+
+    Args:
+        inputs: The input tensor.
+        layer: The EGRU layer.
+        total: If True, returns total operations (including zero operations), else returns effective operations.
+
+    Returns:
+        int: The number of MACs.
+    """
+    print("computing egru layer macs")
+    macs = 0
+    layer_bin = make_binary_copy(layer, all_ones=total)
+    # kernel.T is [3*hidden_size, input_size]
+    # inputs[0].transpose(0, -1) is [input_size, batch_size]
+
+    state_shape = [inputs[0].shape[0], layer.hidden_size]
+    if len(inputs) == 1:
+        y0 = layer._get_state(inputs[0], None, state_shape)
+        h0 = layer._get_state(inputs[0], None, state_shape)
+
+    else:
+        y0 = layer._get_state(inputs[0], inputs[1], state_shape)
+        h0 = layer._get_state(inputs[0], inputs[2], state_shape)
+
+    out_ih = torch.matmul(
+        layer_bin.kernel.T, inputs[0].transpose(0, -1)
+    )  # accounts for i,f,g,o
+    # out shape is 3*h, batch, for hidden feature dim h
+
+    biases = 0
+    bias_ih = 0
+    bias_hh = 0
+    # out matrices are now features, batches
+    bias_ih = layer_bin.bias.unsqueeze(0).transpose(0, -1)
+    bias_hh = layer_bin.recurrent_bias.unsqueeze(0).transpose(0, -1)
+    biases = bias_ih + bias_hh
+
+    # r = sigmoid(Wir*x + bir + Whr*h + bhr)
+    # z = sigmoid(Wiz*x + biz + Whz*h + bhz)
+    # n = tanh(Win*x + bin + r*(Whn*h + bhn))
+    # h = (1-z)*n + z*h
+    macs = 0
+
+    out_hh = torch.matmul(layer_bin.recurrent_kernel.T, y0.transpose(0, -1))
+
+    rzn = out_ih + out_hh
+    # multiplications of all weights and inputs/hidden states
+    # Wir*x, Whr*h, Wiz*x, Whz*h, Win*x, Whn*h
+    macs += rzn.sum()  # multiplications of all weights and inputs/hidden states
+    rzn += biases  # add biases
+
+    hidden = rzn.shape[0] // 3
+    rzn = rzn.reshape(3, hidden, -1)  # 3, h, B
+    out_hh = out_hh.reshape(3, hidden, -1)
+    bias_hh = bias_hh.reshape(3, hidden, -1)
+
+    out_hh_n = out_hh[2, :] + bias_hh[2, :]
+    r = rzn[0, :]  # get r
+    z = rzn[1, :]
+
+    r[r != 0] = 1
+    out_hh_n[out_hh_n != 0] = 1
+
+    n_hh_term_macs = (
+        r * out_hh_n
+    )  # elementwise_multiplication to find macs of r*(Whn*h + bhn) specifically
+    n_hh_term_macs[n_hh_term_macs != 0] = 1
+    macs += n_hh_term_macs.sum()
+
+    # note hh part of n is already binarized, does not influence calculation of macs for n
+    n = out_hh[2, :] + bias_ih[2, :] + n_hh_term_macs
+    n[n != 0] = 1
+    z_a = 1 - z
+    # only do this now because affects z_a
+    z[z != 0] = 1
+    z_a[z_a != 0] = 1
+    t_1 = z_a * n
+    t_2 = z * h0.transpose(0, -1)  # inputs are shape [B, h], all else is [h, B]
+
+    t_1[t_1 != 0] = 1
+    t_2[t_2 != 0] = 1
+    out_nrs = t_1 + t_2
+    macs += out_nrs.sum()
+
+    return macs
+
+
 def single_layer_MACs(inputs, layer, total=False):
     """
     Computes the MACs for a single layer.
@@ -194,5 +289,7 @@ def single_layer_MACs(inputs, layer, total=False):
         macs = recurrent_layer_macs(inputs, layer, total)
     elif isinstance(layer, RECURRENT_CELLS):
         macs = recurrent_cell_macs(inputs, layer, total, in_states)
+    elif isinstance(layer, EGRU_LAYERS):
+        macs = egru_layer_macs(inputs, layer, total, in_states)
 
     return int(macs), spiking
